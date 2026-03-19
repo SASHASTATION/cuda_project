@@ -1,330 +1,257 @@
 #pragma once
+
+#include "config.h"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
-#include <ctime>
 
-// ============================================================
-//  Параметры бенчмарка (единые для всех этапов)
-// ============================================================
-#define N_SAMPLES   100000   // количество точек
-#define N_FEATURES  1000     // количество фичей
-#define N_EPOCHS    50       // эпохи обучения
-#define BLOCK_SIZE  256      // потоков в блоке
-
-// ============================================================
-//  Макрос проверки ошибок CUDA
-// ============================================================
-#define CUDA_CHECK(call)                                                    \
-    do {                                                                    \
-        cudaError_t err = (call);                                           \
-        if (err != cudaSuccess) {                                           \
-            fprintf(stderr, "CUDA error at %s:%d — %s\n",                   \
-                    __FILE__, __LINE__, cudaGetErrorString(err));            \
-            exit(EXIT_FAILURE);                                             \
-        }                                                                   \
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err__ = (call); \
+        if (err__ != cudaSuccess) { \
+            fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err__)); \
+            std::exit(EXIT_FAILURE); \
+        } \
     } while (0)
 
-// ============================================================
-//  Таймер на CUDA events
-// ============================================================
+#define CUDA_KERNEL_CHECK() \
+    do { \
+        CUDA_CHECK(cudaGetLastError()); \
+    } while (0)
+
 struct GpuTimer {
-    cudaEvent_t start, stop;
+    cudaEvent_t start{}, stop{};
 
     GpuTimer() {
         CUDA_CHECK(cudaEventCreate(&start));
         CUDA_CHECK(cudaEventCreate(&stop));
     }
+
     ~GpuTimer() {
         cudaEventDestroy(start);
         cudaEventDestroy(stop);
     }
-    void tic()  { CUDA_CHECK(cudaEventRecord(start, 0)); }
-    void toc()  { CUDA_CHECK(cudaEventRecord(stop, 0));
-                   CUDA_CHECK(cudaEventSynchronize(stop)); }
-    float ms()  { float t; cudaEventElapsedTime(&t, start, stop); return t; }
+
+    void tic() { CUDA_CHECK(cudaEventRecord(start)); }
+    float toc_ms() {
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        return ms;
+    }
 };
 
-// ============================================================
-//  Генерация синтетических данных на GPU
-//  X ~ N(0, 1/sqrt(D)),  y = sigma(X * w_true) > 0.5
-// ============================================================
-__global__ void kernel_generate_data(float* X, float* y,
-                                     float* w_true,
-                                     int N, int D, unsigned long seed)
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
+struct Dataset {
+    float* X = nullptr;
+    float* y = nullptr;
+    float* w = nullptr;
+    float* pred = nullptr;
+    float* errors = nullptr;
+    float* grad = nullptr;
+    float* losses = nullptr;
+};
 
-    // каждый поток — один сэмпл
-    curandState rng;
-    curand_init(seed, idx, 0, &rng);
+inline void allocate_dataset(Dataset& ds, int N, int D) {
+    CUDA_CHECK(cudaMalloc(&ds.X, (size_t)N * D * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&ds.y, N * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&ds.w, D * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&ds.pred, N * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&ds.errors, N * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&ds.grad, D * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&ds.losses, N * sizeof(float)));
+}
 
-    float dot = 0.0f;
-    for (int j = 0; j < D; j++) {
-        float val = curand_normal(&rng) * rsqrtf((float)D);
-        X[idx * D + j] = val;                    // row-major: coalesced при чтении по фичам
-        dot += val * w_true[j];
-    }
-
-    // бинарная метка через сигмоиду + шум
-    float prob = 1.0f / (1.0f + expf(-dot));
-    float noise = curand_uniform(&rng);
-    y[idx] = (noise < prob) ? 1.0f : 0.0f;
+inline void free_dataset(Dataset& ds) {
+    cudaFree(ds.X);
+    cudaFree(ds.y);
+    cudaFree(ds.w);
+    cudaFree(ds.pred);
+    cudaFree(ds.errors);
+    cudaFree(ds.grad);
+    cudaFree(ds.losses);
+    ds = {};
 }
 
 __global__ void kernel_init_true_weights(float* w_true, int D, unsigned long seed) {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     if (j >= D) return;
-    curandState rng;
-    curand_init(seed + 42, j, 0, &rng);
-    w_true[j] = curand_normal(&rng) * 0.5f;
+    curandState st;
+    curand_init(seed, j, 0, &st);
+    w_true[j] = 0.5f * curand_normal(&st);
 }
 
-// ============================================================
-//  Forward pass: предсказание = sigmoid(X * w)
-//  Каждый поток — один сэмпл
-// ============================================================
-__global__ void kernel_predict(const float* X, const float* w,
-                               float* pred, int N, int D)
-{
+__global__ void kernel_generate_data(float* X, float* y, const float* w_true, int N, int D, unsigned long seed) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    curandState st;
+    curand_init(seed, i, 0, &st);
+
+    float dot = 0.0f;
+    for (int j = 0; j < D; ++j) {
+        float x = curand_normal(&st) * rsqrtf((float)D);
+        X[(size_t)i * D + j] = x;
+        dot += x * w_true[j];
+    }
+
+    float p = 1.0f / (1.0f + expf(-dot));
+    y[i] = (curand_uniform(&st) < p) ? 1.0f : 0.0f;
+}
+
+inline void generate_data(Dataset& ds, int N, int D) {
+    float* w_true = nullptr;
+    CUDA_CHECK(cudaMalloc(&w_true, D * sizeof(float)));
+
+    int blocks_d = (D + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    int blocks_n = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    kernel_init_true_weights<<<blocks_d, BLOCK_SIZE>>>(w_true, D, 1234UL);
+    CUDA_KERNEL_CHECK();
+
+    kernel_generate_data<<<blocks_n, BLOCK_SIZE>>>(ds.X, ds.y, w_true, N, D, 5678UL);
+    CUDA_KERNEL_CHECK();
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaMemset(ds.w, 0, D * sizeof(float)));
+    CUDA_CHECK(cudaFree(w_true));
+}
+
+__global__ void kernel_predict(const float* X, const float* w, float* pred, int N, int D) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= N) return;
 
     float dot = 0.0f;
-    for (int j = 0; j < D; j++) {
-        dot += X[i * D + j] * w[j];
+    for (int j = 0; j < D; ++j) {
+        dot += X[(size_t)i * D + j] * w[j];
     }
     pred[i] = 1.0f / (1.0f + expf(-dot));
 }
 
-// ============================================================
-//  Ошибки: error[i] = pred[i] - y[i]
-// ============================================================
-__global__ void kernel_errors(const float* pred, const float* y,
-                              float* errors, int N)
-{
+__global__ void kernel_errors(const float* pred, const float* y, float* errors, int N) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= N) return;
     errors[i] = pred[i] - y[i];
 }
 
-// ============================================================
-//  Градиент: grad[j] = (1/N) * sum_i error[i] * X[i,j]
-//  Один блок — одна фича, потоки блока делят сэмплы между собой
-//  Shared-memory редукция внутри блока
-// ============================================================
-__global__ void kernel_gradient(const float* X, const float* errors,
-                                float* grad, int N, int D)
-{
-    int feature = blockIdx.x;              // какую фичу считаем
+__global__ void kernel_gradient(const float* X, const float* errors, float* grad, int N, int D) {
+    int feature = blockIdx.x;
     if (feature >= D) return;
 
     __shared__ float sdata[BLOCK_SIZE];
     int tid = threadIdx.x;
 
-    // каждый поток суммирует свою порцию сэмплов
     float sum = 0.0f;
     for (int i = tid; i < N; i += blockDim.x) {
-        sum += errors[i] * X[i * D + feature]; // coalesced: соседние блоки читают соседние столбцы
+        sum += errors[i] * X[(size_t)i * D + feature];
     }
+
     sdata[tid] = sum;
     __syncthreads();
 
-    // параллельная редукция
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) sdata[tid] += sdata[tid + s];
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) sdata[tid] += sdata[tid + stride];
         __syncthreads();
     }
 
-    if (tid == 0) {
-        grad[feature] = sdata[0] / (float)N;
-    }
+    if (tid == 0) grad[feature] = sdata[0] / (float)N;
 }
 
-// ============================================================
-//  Binary Cross-Entropy loss (поэлементно)
-// ============================================================
-__global__ void kernel_bce_loss(const float* pred, const float* y,
-                                float* losses, int N)
-{
+inline void forward_backward(Dataset& ds, int N, int D) {
+    int blocks_n = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    kernel_predict<<<blocks_n, BLOCK_SIZE>>>(ds.X, ds.w, ds.pred, N, D);
+    CUDA_KERNEL_CHECK();
+
+    kernel_errors<<<blocks_n, BLOCK_SIZE>>>(ds.pred, ds.y, ds.errors, N);
+    CUDA_KERNEL_CHECK();
+
+    kernel_gradient<<<D, BLOCK_SIZE>>>(ds.X, ds.errors, ds.grad, N, D);
+    CUDA_KERNEL_CHECK();
+}
+
+__global__ void kernel_bce_loss(const float* pred, const float* y, float* losses, int N) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= N) return;
-    float p = fmaxf(fminf(pred[i], 1.0f - 1e-7f), 1e-7f);
+
+    float p = fminf(fmaxf(pred[i], 1e-7f), 1.0f - 1e-7f);
     losses[i] = -(y[i] * logf(p) + (1.0f - y[i]) * logf(1.0f - p));
 }
 
-// ============================================================
-//  Подсчёт accuracy
-// ============================================================
-__global__ void kernel_accuracy(const float* pred, const float* y,
-                                int* correct, int N)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= N) return;
-    int label_pred = (pred[i] >= 0.5f) ? 1 : 0;
-    int label_true = (int)y[i];
-    if (label_pred == label_true) atomicAdd(correct, 1);
-}
-
-// ============================================================
-//  GPU-редукция суммы — shared-memory + atomicAdd
-//  Избегаем копирования 100k float'ов на CPU каждую эпоху
-// ============================================================
-__global__ void kernel_reduce_sum(const float* data, float* result, int N) {
+__global__ void kernel_reduce_sum(const float* data, float* total, int N) {
     __shared__ float sdata[BLOCK_SIZE];
     int tid = threadIdx.x;
-    int i   = blockIdx.x * blockDim.x + threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // каждый поток загружает свой элемент (или 0 если за пределами)
     sdata[tid] = (i < N) ? data[i] : 0.0f;
     __syncthreads();
 
-    // параллельная редукция внутри блока
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) sdata[tid] += sdata[tid + s];
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) sdata[tid] += sdata[tid + stride];
         __syncthreads();
     }
 
-    // каждый блок добавляет свою частичную сумму атомарно
-    if (tid == 0) atomicAdd(result, sdata[0]);
+    if (tid == 0) atomicAdd(total, sdata[0]);
 }
 
-// ============================================================
-//  Вычислить loss (GPU-редукция — без memcpy на CPU)
-// ============================================================
-float compute_loss(const float* d_pred, const float* d_y,
-                   float* d_losses, int N)
-{
+__global__ void kernel_accuracy(const float* pred, const float* y, int* correct, int N) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    int pred_label = (pred[i] >= 0.5f) ? 1 : 0;
+    int true_label = (y[i] >= 0.5f) ? 1 : 0;
+    if (pred_label == true_label) atomicAdd(correct, 1);
+}
+
+inline float compute_loss(const Dataset& ds, int N) {
     int blocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    kernel_bce_loss<<<blocks, BLOCK_SIZE>>>(d_pred, d_y, d_losses, N);
+    float* total = nullptr;
+    float host_total = 0.0f;
 
-    // GPU-редукция вместо memcpy + CPU-loop
-    float* d_total;
-    CUDA_CHECK(cudaMalloc(&d_total, sizeof(float)));
-    CUDA_CHECK(cudaMemset(d_total, 0, sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&total, sizeof(float)));
+    CUDA_CHECK(cudaMemset(total, 0, sizeof(float)));
 
-    kernel_reduce_sum<<<blocks, BLOCK_SIZE>>>(d_losses, d_total, N);
+    kernel_bce_loss<<<blocks, BLOCK_SIZE>>>(ds.pred, ds.y, ds.losses, N);
+    CUDA_KERNEL_CHECK();
+    kernel_reduce_sum<<<blocks, BLOCK_SIZE>>>(ds.losses, total, N);
+    CUDA_KERNEL_CHECK();
 
-    float h_total;
-    CUDA_CHECK(cudaMemcpy(&h_total, d_total, sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaFree(d_total));
-
-    return h_total / N;
+    CUDA_CHECK(cudaMemcpy(&host_total, total, sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(total));
+    return host_total / N;
 }
 
-// ============================================================
-//  Вычислить accuracy
-// ============================================================
-float compute_accuracy(const float* d_pred, const float* d_y, int N) {
-    int* d_correct;
-    CUDA_CHECK(cudaMalloc(&d_correct, sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_correct, 0, sizeof(int)));
-
+inline float compute_accuracy(const Dataset& ds, int N) {
     int blocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    kernel_accuracy<<<blocks, BLOCK_SIZE>>>(d_pred, d_y, d_correct, N);
+    int* correct = nullptr;
+    int host_correct = 0;
 
-    int h_correct;
-    CUDA_CHECK(cudaMemcpy(&h_correct, d_correct, sizeof(int), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaFree(d_correct));
-    return (float)h_correct / N;
+    CUDA_CHECK(cudaMalloc(&correct, sizeof(int)));
+    CUDA_CHECK(cudaMemset(correct, 0, sizeof(int)));
+
+    kernel_accuracy<<<blocks, BLOCK_SIZE>>>(ds.pred, ds.y, correct, N);
+    CUDA_KERNEL_CHECK();
+
+    CUDA_CHECK(cudaMemcpy(&host_correct, correct, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(correct));
+    return (float)host_correct / N;
 }
 
-// ============================================================
-//  Общая подготовка данных (вызывается из main каждого этапа)
-// ============================================================
-struct Dataset {
-    float *d_X, *d_y;
-    float *d_w;            // обучаемые веса
-    float *d_pred;         // предсказания
-    float *d_errors;       // ошибки pred - y
-    float *d_grad;         // градиенты
-    float *d_losses;       // поэлементные потери
-};
-
-void allocate_dataset(Dataset& ds, int N, int D) {
-    CUDA_CHECK(cudaMalloc(&ds.d_X,      (size_t)N * D * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&ds.d_y,      N * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&ds.d_w,      D * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&ds.d_pred,   N * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&ds.d_errors, N * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&ds.d_grad,   D * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&ds.d_losses, N * sizeof(float)));
-}
-
-void free_dataset(Dataset& ds) {
-    cudaFree(ds.d_X);      cudaFree(ds.d_y);
-    cudaFree(ds.d_w);      cudaFree(ds.d_pred);
-    cudaFree(ds.d_errors); cudaFree(ds.d_grad);
-    cudaFree(ds.d_losses);
-}
-
-void generate_data(Dataset& ds, int N, int D) {
-    // создаём «истинные» веса
-    float* d_w_true;
-    CUDA_CHECK(cudaMalloc(&d_w_true, D * sizeof(float)));
-
-    int blocks_d = (D + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    kernel_init_true_weights<<<blocks_d, BLOCK_SIZE>>>(d_w_true, D, 123456UL);
-
-    // генерируем X и y
+inline void evaluate_model(Dataset& ds, int N, int D, float& loss, float& acc) {
     int blocks_n = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    kernel_generate_data<<<blocks_n, BLOCK_SIZE>>>(
-        ds.d_X, ds.d_y, d_w_true, N, D, 654321UL);
-
-    CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaFree(d_w_true));
-
-    // инициализируем обучаемые веса нулями
-    CUDA_CHECK(cudaMemset(ds.d_w, 0, D * sizeof(float)));
+    kernel_predict<<<blocks_n, BLOCK_SIZE>>>(ds.X, ds.w, ds.pred, N, D);
+    CUDA_KERNEL_CHECK();
+    loss = compute_loss(ds, N);
+    acc = compute_accuracy(ds, N);
 }
 
-// ============================================================
-//  Forward + backward pass (общий для dense-оптимизаторов)
-// ============================================================
-void forward_backward(Dataset& ds, int N, int D) {
-    int blocks_n = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
-
-    // 1. предсказания
-    kernel_predict<<<blocks_n, BLOCK_SIZE>>>(ds.d_X, ds.d_w, ds.d_pred, N, D);
-
-    // 2. ошибки
-    kernel_errors<<<blocks_n, BLOCK_SIZE>>>(ds.d_pred, ds.d_y, ds.d_errors, N);
-
-    // 3. градиенты (один блок на фичу)
-    kernel_gradient<<<D, BLOCK_SIZE>>>(ds.d_X, ds.d_errors, ds.d_grad, N, D);
-}
-
-// ============================================================
-//  Печать шапки результатов
-// ============================================================
-void print_header(const char* name) {
-    printf("\n");
-    printf("====================================================\n");
-    printf("  %s\n", name);
+inline void print_header(const char* title) {
+    printf("\n====================================================\n");
+    printf("  %s\n", title);
     printf("  Dataset: %d samples x %d features\n", N_SAMPLES, N_FEATURES);
     printf("  Epochs:  %d\n", N_EPOCHS);
     printf("====================================================\n");
     printf("  Epoch |    Loss    | Accuracy |  Time (ms)\n");
     printf("  ------|------------|----------|----------\n");
 }
-
-// ============================================================
-//  CSV-логгер для сравнения кривых сходимости
-//  Записывает (stage, epoch, loss, accuracy, time_ms) в файл
-// ============================================================
-struct CsvLogger {
-    FILE* fp;
-
-    CsvLogger(const char* filename) {
-        fp = fopen(filename, "w");
-        if (fp) fprintf(fp, "stage,epoch,loss,accuracy,time_ms\n");
-    }
-    ~CsvLogger() { if (fp) fclose(fp); }
-
-    void log(const char* stage, int epoch, float loss, float acc, float ms) {
-        if (fp) fprintf(fp, "%s,%d,%.6f,%.4f,%.2f\n", stage, epoch, loss, acc, ms);
-    }
-};
