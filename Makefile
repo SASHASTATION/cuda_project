@@ -1,60 +1,38 @@
-# ============================================================
-#  CUDA Optimizer Project — Makefile
-#
-#  Основная цель — shared library libkernels.so,
-#  которую вызывает Python-обёртка benchmark.py
-#
-#  Использование:
-#    make lib                — собрать libkernels.so
-#    make bench              — собрать + запустить бенчмарк
-#    make bench ARCH=86      — для RTX 30xx
-#    make clean              — удалить артефакты
-# ============================================================
-
 NVCC       = nvcc
-NVCC_FLAGS = -O2 -std=c++17 --expt-relaxed-constexpr
+NVCC_FLAGS ?= -O2 -std=c++17 --expt-relaxed-constexpr
+ARCH       ?= 70
+GPU_ARCH   = -gencode arch=compute_$(ARCH),code=sm_$(ARCH)
 
-# Compute capability (по умолчанию 70 = Volta/V100):
-#   61 = GTX 1060/1070/1080
-#   70 = V100
-#   75 = RTX 2xxx
-#   80 = A100
-#   86 = RTX 30xx
-#   89 = RTX 40xx
-#   90 = H100
-ARCH ?= 70
-GPU_ARCH = -gencode arch=compute_$(ARCH),code=sm_$(ARCH)
+COMMON_OBJS = stage1_adagrad.o stage2_adam.o stage3_sparse_adagrad.o stage4_mixed_adam.o
 
-.PHONY: lib bench plot clean
+all: benchmark stage1_adagrad stage2_adam stage3_sparse_adagrad stage4_mixed_adam
 
-# Собрать shared library
-lib: libkernels.so
+benchmark: benchmark.cu $(COMMON_OBJS)
+	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -o $@ benchmark.cu $(COMMON_OBJS)
 
-libkernels.so: kernels.cu
-	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) \
-		--compiler-options '-fPIC' \
-		-shared -o $@ $<
+stage1_adagrad: stage1_adagrad.cu
+	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -DSTAGE1_STANDALONE -o $@ stage1_adagrad.cu
 
-# Бенчмарк: все 4 оптимизатора
-bench: lib
-	python3 benchmark.py
+stage2_adam: stage2_adam.cu
+	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -DSTAGE2_STANDALONE -o $@ stage2_adam.cu
 
-# Один оптимизатор
-bench-adagrad: lib
-	python3 benchmark.py -o adagrad
+stage3_sparse_adagrad: stage3_sparse_adagrad.cu
+	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -DSTAGE3_STANDALONE -o $@ stage3_sparse_adagrad.cu
 
-bench-adam: lib
-	python3 benchmark.py -o adam
+stage4_mixed_adam: stage4_mixed_adam.cu
+	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -DSTAGE4_STANDALONE -o $@ stage4_mixed_adam.cu
 
-bench-sparse: lib
-	python3 benchmark.py -o sparse_adagrad
+stage1_adagrad.o: stage1_adagrad.cu common.cuh stages.h config.h
+	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -dc -o $@ stage1_adagrad.cu
 
-bench-mixed: lib
-	python3 benchmark.py -o mixed_adam
+stage2_adam.o: stage2_adam.cu common.cuh stages.h config.h
+	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -dc -o $@ stage2_adam.cu
 
-# Бенчмарк + графики
-plot: lib
-	python3 benchmark.py
+stage3_sparse_adagrad.o: stage3_sparse_adagrad.cu common.cuh stages.h config.h
+	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -dc -o $@ stage3_sparse_adagrad.cu
+
+stage4_mixed_adam.o: stage4_mixed_adam.cu common.cuh stages.h config.h
+	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -dc -o $@ stage4_mixed_adam.cu
 
 clean:
-	rm -f libkernels.so convergence.csv convergence.png
+	rm -f *.o benchmark stage1_adagrad stage2_adam stage3_sparse_adagrad stage4_mixed_adam convergence.csv
