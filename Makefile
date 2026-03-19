@@ -1,76 +1,60 @@
 # ============================================================
 #  CUDA Optimizer Project — Makefile
 #
-#  Сборка:
-#    make all       — собрать все 4 этапа
-#    make stage1    — только Adagrad
-#    make run       — собрать и запустить всё последовательно
-#    make clean     — удалить бинарники
+#  Основная цель — shared library libkernels.so,
+#  которую вызывает Python-обёртка benchmark.py
+#
+#  Использование:
+#    make lib                — собрать libkernels.so
+#    make bench              — собрать + запустить бенчмарк
+#    make bench ARCH=86      — для RTX 30xx
+#    make clean              — удалить артефакты
 # ============================================================
 
-NVCC      = nvcc
+NVCC       = nvcc
 NVCC_FLAGS = -O2 -std=c++17 --expt-relaxed-constexpr
 
-# Compute capability:
-#   5.3  — минимум для FP16
-#   7.0  — Volta (tensor cores, half2 math)
-#   8.0  — Ampere
-#   8.6  — RTX 30xx
-#   8.9  — RTX 40xx
-#   9.0  — H100
-# Укажите свою архитектуру ниже:
+# Compute capability (по умолчанию 70 = Volta/V100):
+#   61 = GTX 1060/1070/1080
+#   70 = V100
+#   75 = RTX 2xxx
+#   80 = A100
+#   86 = RTX 30xx
+#   89 = RTX 40xx
+#   90 = H100
 ARCH ?= 70
 GPU_ARCH = -gencode arch=compute_$(ARCH),code=sm_$(ARCH)
 
-TARGETS = stage1_adagrad stage2_adam stage3_sparse_adagrad stage4_mixed_adam benchmark
+.PHONY: lib bench plot clean
 
-.PHONY: all clean run bench plot
+# Собрать shared library
+lib: libkernels.so
 
-all: $(TARGETS)
+libkernels.so: kernels.cu
+	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) \
+		--compiler-options '-fPIC' \
+		-shared -o $@ $<
 
-stage1_adagrad: stage1_adagrad.cu common.cuh
-	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -o $@ $<
+# Бенчмарк: все 4 оптимизатора
+bench: lib
+	python3 benchmark.py
 
-stage2_adam: stage2_adam.cu common.cuh
-	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -o $@ $<
+# Один оптимизатор
+bench-adagrad: lib
+	python3 benchmark.py -o adagrad
 
-stage3_sparse_adagrad: stage3_sparse_adagrad.cu common.cuh
-	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -o $@ $<
+bench-adam: lib
+	python3 benchmark.py -o adam
 
-stage4_mixed_adam: stage4_mixed_adam.cu common.cuh
-	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -o $@ $<
+bench-sparse: lib
+	python3 benchmark.py -o sparse_adagrad
 
-benchmark: benchmark.cu common.cuh
-	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -o $@ $<
+bench-mixed: lib
+	python3 benchmark.py -o mixed_adam
 
-# Запуск всех этапов последовательно
-run: all
-	@echo ""
-	@echo "╔══════════════════════════════════════════════╗"
-	@echo "║   CUDA Optimizer Benchmark — Full Suite      ║"
-	@echo "╚══════════════════════════════════════════════╝"
-	@echo ""
-	./stage1_adagrad
-	./stage2_adam
-	./stage3_sparse_adagrad
-	./stage4_mixed_adam
-	@echo ""
-	@echo "Все этапы завершены."
+# Бенчмарк + графики
+plot: lib
+	python3 benchmark.py
 
 clean:
-	rm -f $(TARGETS) convergence.csv summary.csv convergence.png
-
-# Единый бенчмарк: все 4 оптимизатора + сравнительная таблица
-bench: benchmark
-	./benchmark
-
-# Визуализация: бенчмарк + графики
-plot: bench
-	python3 plot_convergence.py
-
-# Профилирование через Nsight Compute (stage 1 как baseline)
-profile_stage1: stage1_adagrad
-	ncu --set full -o profile_adagrad ./stage1_adagrad
-
-profile_stage4: stage4_mixed_adam
-	ncu --set full -o profile_mixed_adam ./stage4_mixed_adam
+	rm -f libkernels.so convergence.csv convergence.png
