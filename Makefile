@@ -1,7 +1,8 @@
 NVCC       = nvcc
 NVCC_FLAGS ?= -O2 -std=c++17 --expt-relaxed-constexpr
 ARCH       ?= 70
-GPU_ARCH   = -gencode arch=compute_$(ARCH),code=sm_$(ARCH)
+GPU_ARCH = -gencode arch=compute_$(ARCH),code=sm_$(ARCH) \
+           -gencode arch=compute_$(ARCH),code=compute_$(ARCH)
 
 all: benchmark stage1_adagrad stage2_adam stage3_sparse_adagrad stage4_mixed_adam
 
