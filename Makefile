@@ -5,7 +5,7 @@ GPU_ARCH   = -gencode arch=compute_$(ARCH),code=sm_$(ARCH)
 
 all: benchmark stage1_adagrad stage2_adam stage3_sparse_adagrad stage4_mixed_adam
 
-benchmark: benchmark.cu common.cuh stages.h config.h
+benchmark: benchmark.cu stage1_adagrad.cu stage2_adam.cu stage3_sparse_adagrad.cu stage4_mixed_adam.cu common.cuh stages.h config.h
 	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -o $@ benchmark.cu
 
 stage1_adagrad: stage1_adagrad.cu common.cuh stages.h config.h
