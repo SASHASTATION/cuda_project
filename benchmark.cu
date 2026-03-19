@@ -3,6 +3,12 @@
 #include <cstdio>
 #include <vector>
 
+#include "stage1_adagrad.cu"
+#include "stage2_adam.cu"
+#include "stage3_sparse_adagrad.cu"
+#include "stage4_mixed_adam.cu"
+
+
 static void write_convergence_csv(const std::vector<StageResult>& results) {
     FILE* f = fopen("convergence.csv", "w");
     if (!f) return;
