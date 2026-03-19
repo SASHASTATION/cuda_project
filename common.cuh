@@ -170,7 +170,30 @@ __global__ void kernel_accuracy(const float* pred, const float* y,
 }
 
 // ============================================================
-//  Вычислить loss (CPU-редукция для простоты)
+//  GPU-редукция суммы — shared-memory + atomicAdd
+//  Избегаем копирования 100k float'ов на CPU каждую эпоху
+// ============================================================
+__global__ void kernel_reduce_sum(const float* data, float* result, int N) {
+    __shared__ float sdata[BLOCK_SIZE];
+    int tid = threadIdx.x;
+    int i   = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // каждый поток загружает свой элемент (или 0 если за пределами)
+    sdata[tid] = (i < N) ? data[i] : 0.0f;
+    __syncthreads();
+
+    // параллельная редукция внутри блока
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+
+    // каждый блок добавляет свою частичную сумму атомарно
+    if (tid == 0) atomicAdd(result, sdata[0]);
+}
+
+// ============================================================
+//  Вычислить loss (GPU-редукция — без memcpy на CPU)
 // ============================================================
 float compute_loss(const float* d_pred, const float* d_y,
                    float* d_losses, int N)
@@ -178,14 +201,18 @@ float compute_loss(const float* d_pred, const float* d_y,
     int blocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
     kernel_bce_loss<<<blocks, BLOCK_SIZE>>>(d_pred, d_y, d_losses, N);
 
-    // копируем на CPU и считаем среднее
-    float* h_losses = (float*)malloc(N * sizeof(float));
-    CUDA_CHECK(cudaMemcpy(h_losses, d_losses, N * sizeof(float), cudaMemcpyDeviceToHost));
+    // GPU-редукция вместо memcpy + CPU-loop
+    float* d_total;
+    CUDA_CHECK(cudaMalloc(&d_total, sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_total, 0, sizeof(float)));
 
-    double total = 0.0;
-    for (int i = 0; i < N; i++) total += h_losses[i];
-    free(h_losses);
-    return (float)(total / N);
+    kernel_reduce_sum<<<blocks, BLOCK_SIZE>>>(d_losses, d_total, N);
+
+    float h_total;
+    CUDA_CHECK(cudaMemcpy(&h_total, d_total, sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d_total));
+
+    return h_total / N;
 }
 
 // ============================================================
@@ -283,3 +310,21 @@ void print_header(const char* name) {
     printf("  Epoch |    Loss    | Accuracy |  Time (ms)\n");
     printf("  ------|------------|----------|----------\n");
 }
+
+// ============================================================
+//  CSV-логгер для сравнения кривых сходимости
+//  Записывает (stage, epoch, loss, accuracy, time_ms) в файл
+// ============================================================
+struct CsvLogger {
+    FILE* fp;
+
+    CsvLogger(const char* filename) {
+        fp = fopen(filename, "w");
+        if (fp) fprintf(fp, "stage,epoch,loss,accuracy,time_ms\n");
+    }
+    ~CsvLogger() { if (fp) fclose(fp); }
+
+    void log(const char* stage, int epoch, float loss, float acc, float ms) {
+        if (fp) fprintf(fp, "%s,%d,%.6f,%.4f,%.2f\n", stage, epoch, loss, acc, ms);
+    }
+};
