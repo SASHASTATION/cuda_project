@@ -14,11 +14,14 @@
 ## Структура проекта
 
 ```
-common.cuh                  — общие ядра: генерация данных, forward/backward, таймер
+common.cuh                  — общие ядра: генерация данных, forward/backward, GPU-редукция, таймер
 stage1_adagrad.cu           — Adagrad + SoA layout + coalesced access
 stage2_adam.cu              — Adam + bias correction + сравнение с Adagrad
 stage3_sparse_adagrad.cu    — Sparse Adagrad + atomicAdd + sparse vs dense
 stage4_mixed_adam.cu        — Mixed Precision Adam (FP16 + FP32) + loss scaling
+benchmark.cu                — Единый бенчмарк: все 4 оптимизатора на одних данных
+plot_convergence.py         — Визуализация кривых сходимости из CSV
+profile.sh                  — Автоматизация профилирования Nsight Compute / Systems
 Makefile                    — сборка и запуск
 ```
 
@@ -29,11 +32,22 @@ Makefile                    — сборка и запуск
 # 70=V100, 75=RTX 2xxx, 80=A100, 86=RTX 30xx, 89=RTX 40xx, 90=H100
 make all ARCH=86
 
-# Запуск всех этапов
+# Запуск каждого этапа по отдельности
 make run
+
+# Единый бенчмарк — все 4 оптимизатора + сравнительная таблица
+make bench
+
+# Бенчмарк + графики (требует matplotlib)
+make plot
 
 # Только один этап
 make stage1_adagrad && ./stage1_adagrad
+
+# Профилирование
+./profile.sh            # все этапы + timeline
+./profile.sh stage1     # только Adagrad
+./profile.sh timeline   # Nsight Systems timeline
 ```
 
 ## Этапы
