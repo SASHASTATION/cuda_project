@@ -9,6 +9,7 @@
 
 
 
+
 static void write_convergence_csv(const std::vector<StageResult>& results) {
     FILE* f = fopen("convergence.csv", "w");
     if (!f) return;

@@ -4,7 +4,7 @@
 
 Запуск: python3 plot_convergence.py
 Вход:   convergence.csv (генерируется benchmark)
-Выход:  convergence.png — 4 графика (loss, accuracy, time, cumulative time)
+Выход:  convergence.png — 3 графика (loss, accuracy, time, cumulative time)
 """
 
 import csv
@@ -44,7 +44,7 @@ def load_csv(filename):
     return data
 
 def plot_convergence(data, output='convergence.png'):
-    """4 subplot'а: loss, accuracy, time per epoch, cumulative time"""
+    """3 subplot'а: loss, accuracy, time per epoch, cumulative time"""
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle('CUDA Optimizer Benchmark — Convergence Comparison',
                  fontsize=14, fontweight='bold')
@@ -53,13 +53,13 @@ def plot_convergence(data, output='convergence.png'):
         'adagrad':        '#3B82F6',
         'adam':            '#10B981',
         'sparse_adagrad': '#F59E0B',
-        'mixed_adam':      '#8B5CF6',
+
     }
     labels = {
         'adagrad':        'Adagrad',
         'adam':            'Adam',
         'sparse_adagrad': 'Sparse Adagrad',
-        'mixed_adam':      'Mixed Precision Adam',
+ 
     }
 
     for stage, records in data.items():
