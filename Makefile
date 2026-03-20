@@ -1,5 +1,5 @@
 NVCC       = nvcc
-NVCC_FLAGS ?= -O2 -std=c++17 --expt-relaxed-constexpr
+NVCC_FLAGS ?= -O2 -std=c++17 --expt-relaxed-constexpr -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0
 ARCH       ?= 70
 GPU_ARCH = -gencode arch=compute_$(ARCH),code=sm_$(ARCH) \
            -gencode arch=compute_$(ARCH),code=compute_$(ARCH)
