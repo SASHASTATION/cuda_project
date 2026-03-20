@@ -6,7 +6,7 @@
 #include "stage1_adagrad.cu"
 #include "stage2_adam.cu"
 #include "stage3_sparse_adagrad.cu"
-#include "stage4_mixed_adam.cu"
+
 
 
 static void write_convergence_csv(const std::vector<StageResult>& results) {
@@ -49,7 +49,7 @@ int main() {
     results.push_back(run_adagrad_stage());
     results.push_back(run_adam_stage());
     results.push_back(run_sparse_adagrad_stage());
-    results.push_back(run_mixed_adam_stage());
+
 
     write_convergence_csv(results);
     print_summary(results);
