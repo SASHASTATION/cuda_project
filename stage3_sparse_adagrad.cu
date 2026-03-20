@@ -2,7 +2,7 @@
 #include "stages.h"
 
 constexpr float GRAD_THRESHOLD = 1e-6f;
-
+// kernel_extract_sparse — это фильтрация S^(k) = { j : |g_j| > τ }
 __global__ void kernel_extract_sparse(const float* grad, int* idx, float* val, int* nnz, int D) {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     if (j >= D) return;

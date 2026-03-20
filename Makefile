@@ -4,9 +4,9 @@ ARCH       ?= 70
 GPU_ARCH = -gencode arch=compute_$(ARCH),code=sm_$(ARCH) \
            -gencode arch=compute_$(ARCH),code=compute_$(ARCH)
 
-all: benchmark stage1_adagrad stage2_adam stage3_sparse_adagrad stage4_mixed_adam
+all: benchmark stage1_adagrad stage2_adam stage3_sparse_adagrad 
 
-benchmark: benchmark.cu stage1_adagrad.cu stage2_adam.cu stage3_sparse_adagrad.cu stage4_mixed_adam.cu common.cuh stages.h config.h
+benchmark: benchmark.cu stage1_adagrad.cu stage2_adam.cu stage3_sparse_adagrad.cu  common.cuh stages.h config.h
 	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -o $@ benchmark.cu
 
 stage1_adagrad: stage1_adagrad.cu common.cuh stages.h config.h
@@ -18,8 +18,6 @@ stage2_adam: stage2_adam.cu common.cuh stages.h config.h
 stage3_sparse_adagrad: stage3_sparse_adagrad.cu common.cuh stages.h config.h
 	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -DSTAGE3_STANDALONE -o $@ stage3_sparse_adagrad.cu
 
-stage4_mixed_adam: stage4_mixed_adam.cu common.cuh stages.h config.h
-	$(NVCC) $(NVCC_FLAGS) $(GPU_ARCH) -DSTAGE4_STANDALONE -o $@ stage4_mixed_adam.cu
 
 clean:
-	rm -f *.o benchmark stage1_adagrad stage2_adam stage3_sparse_adagrad stage4_mixed_adam convergence.csv
+	rm -f *.o benchmark stage1_adagrad stage2_adam stage3_sparse_adagrad  convergence.csv
